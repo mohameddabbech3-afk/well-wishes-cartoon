@@ -1,0 +1,141 @@
+name: Render Cartoon Short - Well Wishes
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'shorts/well-wishes/**'
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    name: Render Video
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: shorts/well-wishes/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: shorts/well-wishes/requirements.txt
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2
+
+      - name: Install Playwright Chromium
+        working-directory: shorts/well-wishes
+        run: |
+          npm ci
+          npx playwright install chromium
+          npx playwright install-deps chromium
+
+      - name: Install Python dependencies
+        working-directory: shorts/well-wishes
+        run: |
+          pip install --break-system-packages -r requirements.txt
+
+      - name: Verify voice.mp3 exists
+        working-directory: shorts/well-wishes
+        run: |
+          if [ ! -f voice.mp3 ]; then
+            echo "❌ voice.mp3 not found! Please add it to shorts/well-wishes/voice.mp3"
+            exit 1
+          fi
+          ls -lh voice.mp3
+
+      - name: Extract timings (Arabic)
+        working-directory: shorts/well-wishes
+        run: |
+          python timing.py voice.mp3 script.txt --out work --lang ar
+          cat work/phrases.json
+
+      - name: Update story.js with actual frame counts
+        working-directory: shorts/well-wishes
+        run: |
+          python3 << 'EOF'
+          import json, re
+          with open('work/phrases.json') as f:
+              data = json.load(f)
+          total_frames = data['frames30']
+          print(f"Total frames: {total_frames}")
+
+          with open('web/story.js', 'r') as f:
+              content = f.read()
+
+          content = re.sub(r'export const FPS = 30, TOTAL = \d+',
+                          f'export const FPS = 30, TOTAL = {total_frames}', content)
+
+          with open('web/story.js', 'w') as f:
+              f.write(content)
+          print("Updated story.js TOTAL")
+          EOF
+
+      - name: Generate look-check stills
+        working-directory: shorts/well-wishes
+        run: |
+          node render.mjs stills/a "0,90,210,330,450,570,690,809"
+          python sheet.py stills/a stills/sheet_a.jpg
+
+      - name: Render all frames
+        working-directory: shorts/well-wishes
+        env:
+          RESUME: "1"
+        run: |
+          node render.mjs frames "0-809"
+
+      - name: Generate audio stems
+        working-directory: shorts/well-wishes
+        run: |
+          python audio.py
+          ls -lh music.wav sfx.wav
+
+      - name: Mix audio
+        working-directory: shorts/well-wishes
+        run: |
+          python mix.py voice.mp3 music.wav sfx.wav
+          ls -lh mix_raw.wav
+
+      - name: Final encode + QA
+        working-directory: shorts/well-wishes
+        run: |
+          bash finish.sh "The Well That Heard the Same Wish"
+          ls -lh out/
+
+      - name: Upload video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cartoon-short-video
+          path: shorts/well-wishes/out/*.mp4
+          retention-days: 30
+
+      - name: Upload QA sheet
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-sheet
+          path: shorts/well-wishes/out/qa_sheet.jpg
+          retention-days: 30
+
+      - name: Upload look-check sheet
+        uses: actions/upload-artifact@v4
+        with:
+          name: look-check-sheet
+          path: shorts/well-wishes/stills/sheet_a.jpg
+          retention-days: 30
